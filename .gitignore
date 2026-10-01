@@ -1,0 +1,9 @@
+build/
+.vscode/
+.idea/
+compile_commands.json
+
+# Never commit ROMs or test logs fetched from elsewhere
+*.nes
+tests/roms/*.log
+tests/cpu/*.json
