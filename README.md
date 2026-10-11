@@ -2,7 +2,7 @@
 
 A Nintendo Entertainment System emulator written in C++17.
 
-**Status:** Part 1 of the CPU is done: all 10 addressing modes plus loads, stores, transfers, flags, increments/decrements, JMP, and NOP (59 opcodes), each passing 10,000 SingleStepTests cases. Stack, branches, arithmetic, logic, and shifts are next, followed by PPU rendering.
+**Status:** All 151 official 6502 opcodes are implemented, each passing 10,000 SingleStepTests cases, and nestest matches through its entire official-opcode section (5,003 instructions). Unofficial opcodes are next, followed by PPU rendering.
 
 ## Building
 
@@ -42,7 +42,7 @@ sh tests/cpu/fetch_cpu_tests.sh 20 60    # fetch more by opcode
 bd  FAIL 4983/10000  first: [bd f5 ba  ->  cycles: got $4, want $5]
 ```
 
-**nestest** runs a whole test program and diffs a trace against a known-good log. It stops at `JSR` (line 6) until Part 2 is in.
+**nestest** runs a whole test program and diffs a trace against a known-good log. It currently matches all 5,003 official-opcode lines and stops at the first unofficial opcode (line 5004).
 
 ```sh
 sh tests/roms/fetch_test_roms.sh     # downloads nestest.nes + nestest.log (gitignored)
@@ -54,8 +54,8 @@ ctest --test-dir build
 The runner starts nestest at `$C000`, compares PC, registers, flags, and cycle count against the golden log before every instruction, and stops at the first mismatch or unimplemented opcode:
 
 ```
-Matched 5 line(s). Can't execute log line 6: opcode $20 not implemented
-    C5FD  20 2D C7  JSR $C72D   A:00 X:00 Y:00 P:26 SP:FD PPU:  0, 63 CYC:21
+Matched 5003 line(s). Can't execute log line 5004: opcode $04 not implemented
+    C6BD  04 A9    *NOP $A9 = 00   A:AA X:97 Y:4E P:EF SP:F9 PPU:128, 89 CYC:14579
 ```
 
 Pass an optional third argument to stop after N lines (the official-opcode section is roughly the first 5,000; unofficial opcodes follow).
@@ -83,7 +83,7 @@ The core has no SDL dependency, so tests run headless and in CI.
 - [x] Bus, RAM/register mirroring, OAM DMA, controllers
 - [x] nestest trace-diff harness
 - [x] All addressing modes; loads, stores, transfers, flags, inc/dec, JMP (per-opcode tests passing)
-- [ ] Stack, JSR/RTS/RTI/BRK, branches, ADC/SBC, compares, logic, shifts: nestest official section passing
+- [x] Stack, JSR/RTS/RTI/BRK, branches, ADC/SBC, compares, logic, shifts: nestest official section passing
 - [ ] Unofficial opcodes: full nestest passing
 - [ ] PPU background rendering, then sprites, sprite 0 hit, scrolling
 - [ ] Donkey Kong, then Super Mario Bros. playable

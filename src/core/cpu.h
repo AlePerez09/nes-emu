@@ -74,10 +74,28 @@ private:
     void execute(uint8_t opcode);
     uint16_t todo(const char* what);  // marks unimplemented work and halts cleanly
 
-    // Instruction helpers (add more as you go: adc, sbc, cmp, asl, branch, ...)
+    // Instruction helpers
     void lda(uint16_t addr);
     void ldx(uint16_t addr);
     void ldy(uint16_t addr);
     void inc(uint16_t addr);
     void dec(uint16_t addr);
+
+    // Part 2
+    void add_with_carry(uint8_t m);
+    void adc(uint16_t addr);
+    void sbc(uint16_t addr);
+    void compare(uint8_t reg, uint16_t addr);
+    void and_(uint16_t addr);  // trailing underscore: "and" is a reserved word in C++
+    void ora(uint16_t addr);
+    void eor(uint16_t addr);
+    void bit(uint16_t addr);
+    uint8_t asl(uint8_t v);
+    uint8_t lsr(uint8_t v);
+    uint8_t rol(uint8_t v);
+    uint8_t ror(uint8_t v);
+    void modify(uint16_t addr, uint8_t (Cpu::*op)(uint8_t));
+    void branch(bool condition);
+    uint8_t status_for_push() const;
+    void set_status_from_pull(uint8_t v);
 };

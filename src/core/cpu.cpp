@@ -146,6 +146,89 @@ void Cpu::ldy(uint16_t addr) { y = read(addr); set_zn(y); }
 void Cpu::inc(uint16_t addr) { uint8_t v = uint8_t(read(addr) + 1); write(addr, v); set_zn(v); }
 void Cpu::dec(uint16_t addr) { uint8_t v = uint8_t(read(addr) - 1); write(addr, v); set_zn(v); }
 
+// ---- Part 2 helpers -----------------------------------------------------------
+
+// ADC: A = A + M + C.
+//  C is set when the unsigned result doesn't fit in 8 bits (> 255).
+//  V is set when the *signed* result is wrong: two inputs with the same sign produced
+//  a result with the other sign (e.g. 100 + 100 = -56). The bit trick below checks exactly that:
+//  ~(a ^ m) has bit 7 set if a and m share a sign; (a ^ sum) has bit 7 set if the sign changed.
+void Cpu::add_with_carry(uint8_t m) {
+    uint16_t sum = uint16_t(a + m + (get_flag(C) ? 1 : 0));
+    set_flag(C, sum > 0xFF);
+    set_flag(V, (~(a ^ m) & (a ^ sum) & 0x80) != 0);
+    a = uint8_t(sum);
+    set_zn(a);
+}
+
+void Cpu::adc(uint16_t addr) { add_with_carry(read(addr)); }
+
+// SBC is ADC with the operand's bits inverted: A - M - (1 - C) == A + ~M + C.
+// That's why the 6502 carry flag means "no borrow" during subtraction.
+void Cpu::sbc(uint16_t addr) { add_with_carry(uint8_t(~read(addr))); }
+
+// CMP/CPX/CPY: subtract without storing. C = reg >= M, Z = equal, N = bit 7 of the difference.
+void Cpu::compare(uint8_t reg, uint16_t addr) {
+    uint8_t m = read(addr);
+    set_flag(C, reg >= m);
+    set_zn(uint8_t(reg - m));
+}
+
+void Cpu::and_(uint16_t addr) { a &= read(addr); set_zn(a); }
+void Cpu::ora(uint16_t addr)  { a |= read(addr); set_zn(a); }
+void Cpu::eor(uint16_t addr)  { a ^= read(addr); set_zn(a); }
+
+// BIT: Z comes from A & M, but N and V are copied straight from bits 7 and 6 of M.
+// Games use it to test a hardware status bit without touching A.
+void Cpu::bit(uint16_t addr) {
+    uint8_t m = read(addr);
+    set_flag(Z, (a & m) == 0);
+    set_flag(N, m & 0x80);
+    set_flag(V, m & 0x40);
+}
+
+// Shifts and rotates work on a value and return the result, so the same code serves
+// the accumulator form (ASL A) and the memory form (ASL $10). The bit shifted out goes to C.
+uint8_t Cpu::asl(uint8_t v) { set_flag(C, v & 0x80); v = uint8_t(v << 1); set_zn(v); return v; }
+uint8_t Cpu::lsr(uint8_t v) { set_flag(C, v & 0x01); v = uint8_t(v >> 1); set_zn(v); return v; }
+uint8_t Cpu::rol(uint8_t v) {
+    bool old_c = get_flag(C);
+    set_flag(C, v & 0x80);
+    v = uint8_t((v << 1) | (old_c ? 0x01 : 0));
+    set_zn(v);
+    return v;
+}
+uint8_t Cpu::ror(uint8_t v) {
+    bool old_c = get_flag(C);
+    set_flag(C, v & 0x01);
+    v = uint8_t((v >> 1) | (old_c ? 0x80 : 0));
+    set_zn(v);
+    return v;
+}
+
+// Memory form: read, modify, write back. The address is computed once.
+void Cpu::modify(uint16_t addr, uint8_t (Cpu::*op)(uint8_t)) {
+    write(addr, (this->*op)(read(addr)));
+}
+
+// Branches: signed 8-bit offset relative to the *next* instruction.
+// 2 cycles if not taken, 3 if taken, 4 if taken into a different page.
+void Cpu::branch(bool condition) {
+    int8_t offset = int8_t(read(pc++));
+    cycles += 2;
+    if (!condition) return;
+    uint16_t target = uint16_t(pc + offset);
+    cycles += ((pc & 0xFF00) != (target & 0xFF00)) ? 2 : 1;
+    pc = target;
+}
+
+// Status byte as pushed by PHP/BRK: the B and U bits are forced to 1.
+// (NMI/IRQ push with B = 0; that's the only way software can tell them apart.)
+uint8_t Cpu::status_for_push() const { return uint8_t(p | B | U); }
+
+// Status byte pulled by PLP/RTI: B doesn't exist in the real register, U always reads 1.
+void Cpu::set_status_from_pull(uint8_t v) { p = uint8_t((v & ~B) | U); }
+
 void Cpu::step() {
     if (halted_) return;
     page_crossed_ = false;
@@ -237,15 +320,154 @@ void Cpu::execute(uint8_t opcode) {
         case 0x6C: pc = addr_ind(); cycles += 5; break;                  // JMP (ind)
         case 0xEA: cycles += 2; break;                                   // NOP
 
-        // ---- Part 2 --------------------------------------------------------------------------
-        // Stack:       PHA PHP PLA PLP   (PHP pushes with B and U set; PLP ignores B, keeps U)
-        // Flow:        JSR RTS RTI BRK
-        // Branches:    BCC BCS BEQ BNE BMI BPL BVC BVS (+1 cycle if taken, +1 more on page cross)
-        // Arithmetic:  ADC SBC (overflow flag: see "The 6502 overflow flag explained")
-        // Compare:     CMP CPX CPY
-        // Logic:       AND ORA EOR BIT
-        // Shifts:      ASL LSR ROL ROR (accumulator + memory forms)
-        // ---- Part 3: unofficial opcodes (LAX, SAX, DCP, ISB, SLO, RLA, SRE, RRA, NOPs) ----------
+        // ==== Part 2 ==================================================================
+
+        // ---- Stack -------------------------------------------------------------------
+        case 0x48: push(a); cycles += 3; break;                               // PHA
+        case 0x08: push(status_for_push()); cycles += 3; break;               // PHP
+        case 0x68: a = pop(); set_zn(a); cycles += 4; break;                  // PLA
+        case 0x28: set_status_from_pull(pop()); cycles += 4; break;           // PLP
+
+        // ---- Subroutines and interrupts ------------------------------------------------
+        case 0x20: {                                                          // JSR abs
+            uint16_t target = addr_abs();
+            uint16_t ret = uint16_t(pc - 1);  // pushes the address of JSR's LAST byte, not the next instruction
+            push(uint8_t(ret >> 8));
+            push(uint8_t(ret & 0xFF));
+            pc = target;
+            cycles += 6;
+            break;
+        }
+        case 0x60: {                                                          // RTS
+            uint8_t lo = pop();
+            uint8_t hi = pop();
+            pc = uint16_t(((hi << 8) | lo) + 1);  // ...which is why RTS adds 1
+            cycles += 6;
+            break;
+        }
+        case 0x40: {                                                          // RTI
+            set_status_from_pull(pop());
+            uint8_t lo = pop();
+            uint8_t hi = pop();
+            pc = uint16_t((hi << 8) | lo);        // no +1: interrupts push the exact return address
+            cycles += 6;
+            break;
+        }
+        case 0x00: {                                                          // BRK
+            pc++;  // BRK has a padding byte, so the return address skips it
+            push(uint8_t(pc >> 8));
+            push(uint8_t(pc & 0xFF));
+            push(status_for_push());
+            set_flag(I, true);
+            pc = read16(0xFFFE);
+            cycles += 7;
+            break;
+        }
+
+        // ---- Branches --------------------------------------------------------------------
+        case 0x10: branch(!get_flag(N)); break;                               // BPL
+        case 0x30: branch(get_flag(N));  break;                               // BMI
+        case 0x50: branch(!get_flag(V)); break;                               // BVC
+        case 0x70: branch(get_flag(V));  break;                               // BVS
+        case 0x90: branch(!get_flag(C)); break;                               // BCC
+        case 0xB0: branch(get_flag(C));  break;                               // BCS
+        case 0xD0: branch(!get_flag(Z)); break;                               // BNE
+        case 0xF0: branch(get_flag(Z));  break;                               // BEQ
+
+        // ---- ADC / SBC ---------------------------------------------------------------------
+        case 0x69: adc(addr_imm()); cycles += 2; break;                       // ADC #imm
+        case 0x65: adc(addr_zp());  cycles += 3; break;                       // ADC zp
+        case 0x75: adc(addr_zpx()); cycles += 4; break;                       // ADC zp,X
+        case 0x6D: adc(addr_abs()); cycles += 4; break;                       // ADC abs
+        case 0x7D: adc(addr_abx()); cycles += 4 + page_crossed_; break;       // ADC abs,X
+        case 0x79: adc(addr_aby()); cycles += 4 + page_crossed_; break;       // ADC abs,Y
+        case 0x61: adc(addr_izx()); cycles += 6; break;                       // ADC (zp,X)
+        case 0x71: adc(addr_izy()); cycles += 5 + page_crossed_; break;       // ADC (zp),Y
+
+        case 0xE9: sbc(addr_imm()); cycles += 2; break;                       // SBC #imm
+        case 0xE5: sbc(addr_zp());  cycles += 3; break;                       // SBC zp
+        case 0xF5: sbc(addr_zpx()); cycles += 4; break;                       // SBC zp,X
+        case 0xED: sbc(addr_abs()); cycles += 4; break;                       // SBC abs
+        case 0xFD: sbc(addr_abx()); cycles += 4 + page_crossed_; break;       // SBC abs,X
+        case 0xF9: sbc(addr_aby()); cycles += 4 + page_crossed_; break;       // SBC abs,Y
+        case 0xE1: sbc(addr_izx()); cycles += 6; break;                       // SBC (zp,X)
+        case 0xF1: sbc(addr_izy()); cycles += 5 + page_crossed_; break;       // SBC (zp),Y
+
+        // ---- Compares ----------------------------------------------------------------------
+        case 0xC9: compare(a, addr_imm()); cycles += 2; break;                // CMP #imm
+        case 0xC5: compare(a, addr_zp());  cycles += 3; break;                // CMP zp
+        case 0xD5: compare(a, addr_zpx()); cycles += 4; break;                // CMP zp,X
+        case 0xCD: compare(a, addr_abs()); cycles += 4; break;                // CMP abs
+        case 0xDD: compare(a, addr_abx()); cycles += 4 + page_crossed_; break;// CMP abs,X
+        case 0xD9: compare(a, addr_aby()); cycles += 4 + page_crossed_; break;// CMP abs,Y
+        case 0xC1: compare(a, addr_izx()); cycles += 6; break;                // CMP (zp,X)
+        case 0xD1: compare(a, addr_izy()); cycles += 5 + page_crossed_; break;// CMP (zp),Y
+
+        case 0xE0: compare(x, addr_imm()); cycles += 2; break;                // CPX #imm
+        case 0xE4: compare(x, addr_zp());  cycles += 3; break;                // CPX zp
+        case 0xEC: compare(x, addr_abs()); cycles += 4; break;                // CPX abs
+
+        case 0xC0: compare(y, addr_imm()); cycles += 2; break;                // CPY #imm
+        case 0xC4: compare(y, addr_zp());  cycles += 3; break;                // CPY zp
+        case 0xCC: compare(y, addr_abs()); cycles += 4; break;                // CPY abs
+
+        // ---- Logic -------------------------------------------------------------------------
+        case 0x29: and_(addr_imm()); cycles += 2; break;                      // AND #imm
+        case 0x25: and_(addr_zp());  cycles += 3; break;                      // AND zp
+        case 0x35: and_(addr_zpx()); cycles += 4; break;                      // AND zp,X
+        case 0x2D: and_(addr_abs()); cycles += 4; break;                      // AND abs
+        case 0x3D: and_(addr_abx()); cycles += 4 + page_crossed_; break;      // AND abs,X
+        case 0x39: and_(addr_aby()); cycles += 4 + page_crossed_; break;      // AND abs,Y
+        case 0x21: and_(addr_izx()); cycles += 6; break;                      // AND (zp,X)
+        case 0x31: and_(addr_izy()); cycles += 5 + page_crossed_; break;      // AND (zp),Y
+
+        case 0x09: ora(addr_imm()); cycles += 2; break;                       // ORA #imm
+        case 0x05: ora(addr_zp());  cycles += 3; break;                       // ORA zp
+        case 0x15: ora(addr_zpx()); cycles += 4; break;                       // ORA zp,X
+        case 0x0D: ora(addr_abs()); cycles += 4; break;                       // ORA abs
+        case 0x1D: ora(addr_abx()); cycles += 4 + page_crossed_; break;       // ORA abs,X
+        case 0x19: ora(addr_aby()); cycles += 4 + page_crossed_; break;       // ORA abs,Y
+        case 0x01: ora(addr_izx()); cycles += 6; break;                       // ORA (zp,X)
+        case 0x11: ora(addr_izy()); cycles += 5 + page_crossed_; break;       // ORA (zp),Y
+
+        case 0x49: eor(addr_imm()); cycles += 2; break;                       // EOR #imm
+        case 0x45: eor(addr_zp());  cycles += 3; break;                       // EOR zp
+        case 0x55: eor(addr_zpx()); cycles += 4; break;                       // EOR zp,X
+        case 0x4D: eor(addr_abs()); cycles += 4; break;                       // EOR abs
+        case 0x5D: eor(addr_abx()); cycles += 4 + page_crossed_; break;       // EOR abs,X
+        case 0x59: eor(addr_aby()); cycles += 4 + page_crossed_; break;       // EOR abs,Y
+        case 0x41: eor(addr_izx()); cycles += 6; break;                       // EOR (zp,X)
+        case 0x51: eor(addr_izy()); cycles += 5 + page_crossed_; break;       // EOR (zp),Y
+
+        case 0x24: bit(addr_zp());  cycles += 3; break;                       // BIT zp
+        case 0x2C: bit(addr_abs()); cycles += 4; break;                       // BIT abs
+
+        // ---- Shifts and rotates (accumulator form, then memory forms) ----------------------
+        case 0x0A: a = asl(a); cycles += 2; break;                            // ASL A
+        case 0x06: modify(addr_zp(),  &Cpu::asl); cycles += 5; break;         // ASL zp
+        case 0x16: modify(addr_zpx(), &Cpu::asl); cycles += 6; break;         // ASL zp,X
+        case 0x0E: modify(addr_abs(), &Cpu::asl); cycles += 6; break;         // ASL abs
+        case 0x1E: modify(addr_abx(), &Cpu::asl); cycles += 7; break;         // ASL abs,X
+
+        case 0x4A: a = lsr(a); cycles += 2; break;                            // LSR A
+        case 0x46: modify(addr_zp(),  &Cpu::lsr); cycles += 5; break;         // LSR zp
+        case 0x56: modify(addr_zpx(), &Cpu::lsr); cycles += 6; break;         // LSR zp,X
+        case 0x4E: modify(addr_abs(), &Cpu::lsr); cycles += 6; break;         // LSR abs
+        case 0x5E: modify(addr_abx(), &Cpu::lsr); cycles += 7; break;         // LSR abs,X
+
+        case 0x2A: a = rol(a); cycles += 2; break;                            // ROL A
+        case 0x26: modify(addr_zp(),  &Cpu::rol); cycles += 5; break;         // ROL zp
+        case 0x36: modify(addr_zpx(), &Cpu::rol); cycles += 6; break;         // ROL zp,X
+        case 0x2E: modify(addr_abs(), &Cpu::rol); cycles += 6; break;         // ROL abs
+        case 0x3E: modify(addr_abx(), &Cpu::rol); cycles += 7; break;         // ROL abs,X
+
+        case 0x6A: a = ror(a); cycles += 2; break;                            // ROR A
+        case 0x66: modify(addr_zp(),  &Cpu::ror); cycles += 5; break;         // ROR zp
+        case 0x76: modify(addr_zpx(), &Cpu::ror); cycles += 6; break;         // ROR zp,X
+        case 0x6E: modify(addr_abs(), &Cpu::ror); cycles += 6; break;         // ROR abs
+        case 0x7E: modify(addr_abx(), &Cpu::ror); cycles += 7; break;         // ROR abs,X
+
+        // ---- Part 3: unofficial opcodes (LAX, SAX, DCP, ISB, SLO, RLA, SRE, RRA, NOPs) ------
 
         default:
             pc--;  // leave pc on the offending opcode so traces point at it
