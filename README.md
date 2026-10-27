@@ -2,7 +2,7 @@
 
 A Nintendo Entertainment System emulator written in C++17.
 
-**Status:** All 151 official 6502 opcodes are implemented, each passing 10,000 SingleStepTests cases, and nestest matches through its entire official-opcode section (5,003 instructions). Unofficial opcodes are next, followed by PPU rendering.
+**Status:** The CPU is complete. All 151 official 6502 opcodes and 85 stable unofficial ones pass 10,000 SingleStepTests cases each, and nestest passes end to end (8,991 instructions, cycle-exact). PPU rendering is next.
 
 ## Building
 
@@ -42,7 +42,7 @@ sh tests/cpu/fetch_cpu_tests.sh 20 60    # fetch more by opcode
 bd  FAIL 4983/10000  first: [bd f5 ba  ->  cycles: got $4, want $5]
 ```
 
-**nestest** runs a whole test program and diffs a trace against a known-good log. It currently matches all 5,003 official-opcode lines and stops at the first unofficial opcode (line 5004).
+**nestest** runs a whole test program and diffs a trace against a known-good log. It passes all 8,991 lines, official and unofficial opcodes included.
 
 ```sh
 sh tests/roms/fetch_test_roms.sh     # downloads nestest.nes + nestest.log (gitignored)
@@ -51,14 +51,15 @@ cmake -S . -B build                  # re-run so CTest picks up the ROM
 ctest --test-dir build
 ```
 
-The runner starts nestest at `$C000`, compares PC, registers, flags, and cycle count against the golden log before every instruction, and stops at the first mismatch or unimplemented opcode:
+The runner starts nestest at `$C000`, compares PC, registers, flags, and cycle count against the golden log before every instruction, and stops at the first mismatch or unimplemented opcode. At the end it checks nestest's own result bytes:
 
 ```
-Matched 5003 line(s). Can't execute log line 5004: opcode $04 not implemented
-    C6BD  04 A9    *NOP $A9 = 00   A:AA X:97 Y:4E P:EF SP:F9 PPU:128, 89 CYC:14579
+All 8991 line(s) matched. Result bytes: $02=00 $03=00 (pass)
 ```
 
-Pass an optional third argument to stop after N lines (the official-opcode section is roughly the first 5,000; unofficial opcodes follow).
+Pass an optional third argument to stop after N lines (the official-opcode section is the first 5,003; unofficial opcodes follow).
+
+The unstable unofficial opcodes (XAA, LAX #imm, SHA, SHX, SHY, TAS, LAS), whose results vary between physical chips, and the JAM opcodes that lock up the CPU are intentionally not implemented. No licensed game depends on them; hitting one halts the emulator with a message.
 
 ## Architecture
 
@@ -84,7 +85,7 @@ The core has no SDL dependency, so tests run headless and in CI.
 - [x] nestest trace-diff harness
 - [x] All addressing modes; loads, stores, transfers, flags, inc/dec, JMP (per-opcode tests passing)
 - [x] Stack, JSR/RTS/RTI/BRK, branches, ADC/SBC, compares, logic, shifts: nestest official section passing
-- [ ] Unofficial opcodes: full nestest passing
+- [x] Unofficial opcodes: full nestest passing
 - [ ] PPU background rendering, then sprites, sprite 0 hit, scrolling
 - [ ] Donkey Kong, then Super Mario Bros. playable
 - [ ] Mappers 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3)

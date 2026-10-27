@@ -21,7 +21,15 @@ c9 c5 d5 cd dd d9 c1 d1 e0 e4 ec c0 c4 cc
 49 45 55 4d 5d 59 41 51 24 2c
 0a 06 16 0e 1e 4a 46 56 4e 5e 2a 26 36 2e 3e 6a 66 76 6e 7e"
 
-OPS="${*:-$PART1 $PART2}"
+# Part 3: unofficial opcodes (stable ones only)
+PART3="1a 3a 5a 7a da fa 80 82 89 c2 e2 04 44 64 14 34 54 74 d4 f4 0c 1c 3c 5c 7c dc fc
+a7 b7 af bf a3 b3 87 97 8f 83 eb
+c7 d7 cf df db c3 d3 e7 f7 ef ff fb e3 f3
+07 17 0f 1f 1b 03 13 27 37 2f 3f 3b 23 33
+47 57 4f 5f 5b 43 53 67 77 6f 7f 7b 63 73
+0b 2b 4b 6b cb"
+
+OPS="${*:-$PART1 $PART2 $PART3}"
 for op in $OPS; do
   if [ ! -f "$op.json" ]; then
     curl -fsSL -o "$op.json" "$BASE/$op.json"

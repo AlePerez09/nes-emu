@@ -168,8 +168,9 @@ void Cpu::adc(uint16_t addr) { add_with_carry(read(addr)); }
 void Cpu::sbc(uint16_t addr) { add_with_carry(uint8_t(~read(addr))); }
 
 // CMP/CPX/CPY: subtract without storing. C = reg >= M, Z = equal, N = bit 7 of the difference.
-void Cpu::compare(uint8_t reg, uint16_t addr) {
-    uint8_t m = read(addr);
+void Cpu::compare(uint8_t reg, uint16_t addr) { compare_value(reg, read(addr)); }
+
+void Cpu::compare_value(uint8_t reg, uint8_t m) {
     set_flag(C, reg >= m);
     set_zn(uint8_t(reg - m));
 }
@@ -228,6 +229,31 @@ uint8_t Cpu::status_for_push() const { return uint8_t(p | B | U); }
 
 // Status byte pulled by PLP/RTI: B doesn't exist in the real register, U always reads 1.
 void Cpu::set_status_from_pull(uint8_t v) { p = uint8_t((v & ~B) | U); }
+
+// ---- Part 3 helpers: unofficial opcodes -------------------------------------------
+// The 6502's decoder is a grid of logic, not a lookup table, so the 105 "unused" opcode
+// slots still do something: usually two official operations firing at once. Most combine a
+// read-modify-write (ASL, ROL, LSR, ROR, INC, DEC) with an accumulator op (ORA, AND, EOR,
+// ADC, SBC, CMP), and they take the same cycles as the read-modify-write on its own.
+// Reference: https://www.nesdev.org/wiki/CPU_unofficial_opcodes
+
+// LAX: LDA + LDX at once.
+void Cpu::lax(uint16_t addr) { a = x = read(addr); set_zn(a); }
+
+// SAX: store A AND X. No flags change.
+void Cpu::sax(uint16_t addr) { write(addr, uint8_t(a & x)); }
+
+// Each one modifies memory, then feeds the *new* value into the accumulator op.
+void Cpu::dcp(uint16_t addr) { uint8_t v = uint8_t(read(addr) - 1); write(addr, v); compare_value(a, v); }
+void Cpu::isb(uint16_t addr) { uint8_t v = uint8_t(read(addr) + 1); write(addr, v); add_with_carry(uint8_t(~v)); }
+void Cpu::slo(uint16_t addr) { uint8_t v = asl(read(addr)); write(addr, v); a |= v; set_zn(a); }
+void Cpu::rla(uint16_t addr) { uint8_t v = rol(read(addr)); write(addr, v); a &= v; set_zn(a); }
+void Cpu::sre(uint16_t addr) { uint8_t v = lsr(read(addr)); write(addr, v); a ^= v; set_zn(a); }
+// ROR's carry-out becomes ADC's carry-in, which is exactly what the hardware does.
+void Cpu::rra(uint16_t addr) { uint8_t v = ror(read(addr)); write(addr, v); add_with_carry(v); }
+
+// Unofficial NOPs that take an operand still perform the read (and its page-cross cycle).
+void Cpu::nop_read(uint16_t addr) { (void)read(addr); }
 
 void Cpu::step() {
     if (halted_) return;
@@ -467,7 +493,120 @@ void Cpu::execute(uint8_t opcode) {
         case 0x6E: modify(addr_abs(), &Cpu::ror); cycles += 6; break;         // ROR abs
         case 0x7E: modify(addr_abx(), &Cpu::ror); cycles += 7; break;         // ROR abs,X
 
-        // ---- Part 3: unofficial opcodes (LAX, SAX, DCP, ISB, SLO, RLA, SRE, RRA, NOPs) ------
+        // ==== Part 3: unofficial opcodes ===============================================
+
+        // ---- NOPs of every size. Skipping the operand bytes correctly is what matters. ----
+        case 0x1A: case 0x3A: case 0x5A: case 0x7A: case 0xDA: case 0xFA:    // NOP (implied)
+            cycles += 2; break;
+        case 0x80: case 0x82: case 0x89: case 0xC2: case 0xE2:               // NOP #imm
+            nop_read(addr_imm()); cycles += 2; break;
+        case 0x04: case 0x44: case 0x64:                                     // NOP zp
+            nop_read(addr_zp()); cycles += 3; break;
+        case 0x14: case 0x34: case 0x54: case 0x74: case 0xD4: case 0xF4:    // NOP zp,X
+            nop_read(addr_zpx()); cycles += 4; break;
+        case 0x0C:                                                           // NOP abs
+            nop_read(addr_abs()); cycles += 4; break;
+        case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC:    // NOP abs,X
+            nop_read(addr_abx()); cycles += 4 + page_crossed_; break;
+
+        // ---- LAX: load A and X --------------------------------------------------------
+        case 0xA7: lax(addr_zp());  cycles += 3; break;                      // LAX zp
+        case 0xB7: lax(addr_zpy()); cycles += 4; break;                      // LAX zp,Y
+        case 0xAF: lax(addr_abs()); cycles += 4; break;                      // LAX abs
+        case 0xBF: lax(addr_aby()); cycles += 4 + page_crossed_; break;      // LAX abs,Y
+        case 0xA3: lax(addr_izx()); cycles += 6; break;                      // LAX (zp,X)
+        case 0xB3: lax(addr_izy()); cycles += 5 + page_crossed_; break;      // LAX (zp),Y
+
+        // ---- SAX: store A & X ------------------------------------------------------------
+        case 0x87: sax(addr_zp());  cycles += 3; break;                      // SAX zp
+        case 0x97: sax(addr_zpy()); cycles += 4; break;                      // SAX zp,Y
+        case 0x8F: sax(addr_abs()); cycles += 4; break;                      // SAX abs
+        case 0x83: sax(addr_izx()); cycles += 6; break;                      // SAX (zp,X)
+
+        // ---- SBC #imm duplicate ------------------------------------------------------------
+        case 0xEB: sbc(addr_imm()); cycles += 2; break;                      // SBC #imm (unofficial copy of $E9)
+
+        // ---- Read-modify-write combos. Same 7 modes and cycle counts for all six. --------
+        case 0xC7: dcp(addr_zp());  cycles += 5; break;                      // DCP zp      (DEC + CMP)
+        case 0xD7: dcp(addr_zpx()); cycles += 6; break;                      // DCP zp,X
+        case 0xCF: dcp(addr_abs()); cycles += 6; break;                      // DCP abs
+        case 0xDF: dcp(addr_abx()); cycles += 7; break;                      // DCP abs,X
+        case 0xDB: dcp(addr_aby()); cycles += 7; break;                      // DCP abs,Y
+        case 0xC3: dcp(addr_izx()); cycles += 8; break;                      // DCP (zp,X)
+        case 0xD3: dcp(addr_izy()); cycles += 8; break;                      // DCP (zp),Y
+
+        case 0xE7: isb(addr_zp());  cycles += 5; break;                      // ISB zp      (INC + SBC)
+        case 0xF7: isb(addr_zpx()); cycles += 6; break;                      // ISB zp,X
+        case 0xEF: isb(addr_abs()); cycles += 6; break;                      // ISB abs
+        case 0xFF: isb(addr_abx()); cycles += 7; break;                      // ISB abs,X
+        case 0xFB: isb(addr_aby()); cycles += 7; break;                      // ISB abs,Y
+        case 0xE3: isb(addr_izx()); cycles += 8; break;                      // ISB (zp,X)
+        case 0xF3: isb(addr_izy()); cycles += 8; break;                      // ISB (zp),Y
+
+        case 0x07: slo(addr_zp());  cycles += 5; break;                      // SLO zp      (ASL + ORA)
+        case 0x17: slo(addr_zpx()); cycles += 6; break;                      // SLO zp,X
+        case 0x0F: slo(addr_abs()); cycles += 6; break;                      // SLO abs
+        case 0x1F: slo(addr_abx()); cycles += 7; break;                      // SLO abs,X
+        case 0x1B: slo(addr_aby()); cycles += 7; break;                      // SLO abs,Y
+        case 0x03: slo(addr_izx()); cycles += 8; break;                      // SLO (zp,X)
+        case 0x13: slo(addr_izy()); cycles += 8; break;                      // SLO (zp),Y
+
+        case 0x27: rla(addr_zp());  cycles += 5; break;                      // RLA zp      (ROL + AND)
+        case 0x37: rla(addr_zpx()); cycles += 6; break;                      // RLA zp,X
+        case 0x2F: rla(addr_abs()); cycles += 6; break;                      // RLA abs
+        case 0x3F: rla(addr_abx()); cycles += 7; break;                      // RLA abs,X
+        case 0x3B: rla(addr_aby()); cycles += 7; break;                      // RLA abs,Y
+        case 0x23: rla(addr_izx()); cycles += 8; break;                      // RLA (zp,X)
+        case 0x33: rla(addr_izy()); cycles += 8; break;                      // RLA (zp),Y
+
+        case 0x47: sre(addr_zp());  cycles += 5; break;                      // SRE zp      (LSR + EOR)
+        case 0x57: sre(addr_zpx()); cycles += 6; break;                      // SRE zp,X
+        case 0x4F: sre(addr_abs()); cycles += 6; break;                      // SRE abs
+        case 0x5F: sre(addr_abx()); cycles += 7; break;                      // SRE abs,X
+        case 0x5B: sre(addr_aby()); cycles += 7; break;                      // SRE abs,Y
+        case 0x43: sre(addr_izx()); cycles += 8; break;                      // SRE (zp,X)
+        case 0x53: sre(addr_izy()); cycles += 8; break;                      // SRE (zp),Y
+
+        case 0x67: rra(addr_zp());  cycles += 5; break;                      // RRA zp      (ROR + ADC)
+        case 0x77: rra(addr_zpx()); cycles += 6; break;                      // RRA zp,X
+        case 0x6F: rra(addr_abs()); cycles += 6; break;                      // RRA abs
+        case 0x7F: rra(addr_abx()); cycles += 7; break;                      // RRA abs,X
+        case 0x7B: rra(addr_aby()); cycles += 7; break;                      // RRA abs,Y
+        case 0x63: rra(addr_izx()); cycles += 8; break;                      // RRA (zp,X)
+        case 0x73: rra(addr_izy()); cycles += 8; break;                      // RRA (zp),Y
+
+        // ---- Stable immediate-mode combos (not in nestest, but some games use them) ------
+        case 0x0B: case 0x2B: {                                              // ANC #imm (AND, then C = N)
+            and_(addr_imm());
+            set_flag(C, get_flag(N));
+            cycles += 2;
+            break;
+        }
+        case 0x4B:                                                           // ALR #imm (AND + LSR A)
+            and_(addr_imm()); a = lsr(a); cycles += 2; break;
+        case 0x6B: {                                                         // ARR #imm (AND + ROR A, odd flags)
+            and_(addr_imm());
+            a = ror(a);
+            set_flag(C, a & 0x40);                         // C comes from bit 6 of the result
+            set_flag(V, ((a >> 6) ^ (a >> 5)) & 1);        // V = bit 6 XOR bit 5
+            cycles += 2;
+            break;
+        }
+        case 0xCB: {                                                         // SBX #imm: X = (A & X) - imm
+            uint8_t m = read(addr_imm());
+            uint8_t ax = uint8_t(a & x);
+            set_flag(C, ax >= m);                          // compare-style carry; ignores the old C
+            x = uint8_t(ax - m);
+            set_zn(x);
+            cycles += 2;
+            break;
+        }
+
+        // Not implemented on purpose:
+        //  - Unstable opcodes whose results vary between physical chips:
+        //    $8B XAA, $AB LAX #imm, $93/$9F SHA, $9B TAS, $9C SHY, $9E SHX, $BB LAS.
+        //  - JAM/KIL ($02 $12 $22 ...), which lock up a real CPU until reset.
+        // No licensed game relies on them. Hitting one halts the emulator with a clear message.
 
         default:
             pc--;  // leave pc on the offending opcode so traces point at it

@@ -86,6 +86,7 @@ private:
     void adc(uint16_t addr);
     void sbc(uint16_t addr);
     void compare(uint8_t reg, uint16_t addr);
+    void compare_value(uint8_t reg, uint8_t m);
     void and_(uint16_t addr);  // trailing underscore: "and" is a reserved word in C++
     void ora(uint16_t addr);
     void eor(uint16_t addr);
@@ -98,4 +99,15 @@ private:
     void branch(bool condition);
     uint8_t status_for_push() const;
     void set_status_from_pull(uint8_t v);
+
+    // Part 3: unofficial opcodes
+    void lax(uint16_t addr);
+    void sax(uint16_t addr);
+    void dcp(uint16_t addr);
+    void isb(uint16_t addr);
+    void slo(uint16_t addr);
+    void rla(uint16_t addr);
+    void sre(uint16_t addr);
+    void rra(uint16_t addr);
+    void nop_read(uint16_t addr);
 };
