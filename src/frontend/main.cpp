@@ -45,8 +45,14 @@ int main(int argc, char** argv) {
         SDL_Window* window = SDL_CreateWindow("nes-emu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                               Ppu::kWidth * kScale, Ppu::kHeight * kScale, 0);
         SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);  // no GPU (VMs, remote desktop)
         SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                                  Ppu::kWidth, Ppu::kHeight);
+        if (!window || !renderer || !texture) {
+            std::fprintf(stderr, "SDL setup failed: %s\n", SDL_GetError());
+            SDL_Quit();
+            return 1;
+        }
 
         bool running = true;
         bool debug_patterns = true;  // on by default until the real renderer exists

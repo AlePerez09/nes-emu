@@ -6,18 +6,16 @@ A Nintendo Entertainment System emulator written in C++17.
 
 ## Building
 
-Requires CMake 3.16+ and a C++17 compiler. SDL2 is optional: without it you get the core library and test harnesses only. The first configure downloads nlohmann/json for the CPU tests (turn off with `-DNES_BUILD_CPU_TESTS=OFF`).
+Requires CMake 3.16+ and a C++17 compiler. Nothing else needs installing: the first configure downloads nlohmann/json (for the CPU tests) and, if SDL2 isn't already installed, downloads and builds SDL2 statically, which takes a minute or two. Use `-DNES_BUILD_FRONTEND=OFF` for a headless build or `-DNES_BUILD_CPU_TESTS=OFF` to skip the test runner.
 
 ```sh
-# Linux:   sudo apt install libsdl2-dev
-# macOS:   brew install sdl2
-# Windows: vcpkg install sdl2, then add -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-
 cmake -S . -B build
-cmake --build build
+cmake --build build --config Release
 ```
 
-Run a ROM (SDL2 build only):
+On Windows (Visual Studio generator) the executables land in `build/Release/`; elsewhere they're in `build/`.
+
+Run a ROM:
 
 ```sh
 ./build/nes path/to/game.nes
