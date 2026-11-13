@@ -22,7 +22,8 @@ public:
     // CPU-facing registers $2000-$2007 (reg = addr & 7)
     uint8_t cpu_read(uint16_t reg);
     void cpu_write(uint16_t reg, uint8_t value);
-    void oam_dma_write(uint8_t index, uint8_t value) { oam_[index] = value; }
+    // OAM DMA ($4014) starts at the current OAMADDR and wraps around.
+    void oam_dma_write(uint8_t index, uint8_t value) { oam_[uint8_t(oam_addr_ + index)] = value; }
 
     bool take_nmi() {
         if (nmi_pending_ && nmi_delay_) { nmi_delay_ = false; return false; }  // wait one instruction
@@ -91,6 +92,17 @@ private:
     uint16_t bg_pattern_hi_ = 0;
     uint16_t bg_attrib_lo_ = 0;
     uint16_t bg_attrib_hi_ = 0;
+
+    // Sprites (up to 8 per scanline)
+    void evaluate_sprites();
+    void check_sprite_overflow(int start, int height);
+    static uint8_t reverse_bits(uint8_t b);
+    int sprite_count_ = 0;
+    bool sprite_zero_on_line_ = false;  // is OAM entry 0 among this line's sprites?
+    std::array<uint8_t, 8> sprite_x_{};
+    std::array<uint8_t, 8> sprite_attr_{};
+    std::array<uint8_t, 8> sprite_lo_{};   // pattern bits, already flipped if needed
+    std::array<uint8_t, 8> sprite_hi_{};
 
     std::array<uint32_t, kWidth * kHeight> framebuffer_{};  // 0xAARRGGBB
 };

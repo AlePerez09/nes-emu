@@ -29,6 +29,8 @@ void Ppu::reset() {
     frame_complete = false;
     odd_frame_ = false;
     nmi_delay_ = false;
+    sprite_count_ = 0;
+    sprite_zero_on_line_ = false;
     bg_pattern_lo_ = bg_pattern_hi_ = bg_attrib_lo_ = bg_attrib_hi_ = 0;
     next_tile_ = next_attrib_ = next_pattern_lo_ = next_pattern_hi_ = 0;
 }
@@ -133,6 +135,79 @@ uint16_t Ppu::background_pattern_addr() const {
     return uint16_t(table + next_tile_ * 16 + ((v_ >> 12) & 0x07));
 }
 
+// ---- Sprites ---------------------------------------------------------------------------------
+// OAM holds 64 sprites x 4 bytes: Y, tile, attributes, X.
+//   Y is one less than the screen line the sprite starts on.
+//   Attributes: bits 0-1 palette (sprites use palettes 4-7), bit 5 = behind background,
+//               bit 6 = flip horizontally, bit 7 = flip vertically.
+// The hardware only has room for 8 sprites per scanline. At the end of each line (dot 257) it
+// picks the first 8 that cover the NEXT line and fetches their pixel data. More than 8 sets the
+// overflow flag, and the extras simply aren't drawn, which is why NES games flicker sprites.
+
+void Ppu::evaluate_sprites() {
+    sprite_count_ = 0;
+    sprite_zero_on_line_ = false;
+
+    const int height = (ctrl_ & 0x20) ? 16 : 8;  // PPUCTRL bit 5: 8x16 sprites
+    for (int i = 0; i < 64; ++i) {
+        const int row = scanline_ - oam_[i * 4];  // which row of the sprite lands on the next line
+        if (row < 0 || row >= height) continue;
+
+        const uint8_t tile = oam_[i * 4 + 1];
+        const uint8_t attr = oam_[i * 4 + 2];
+        const int r = (attr & 0x80) ? (height - 1 - row) : row;  // vertical flip
+
+        uint16_t addr;
+        if (height == 8) {
+            const uint16_t table = (ctrl_ & 0x08) ? 0x1000 : 0x0000;  // PPUCTRL bit 3
+            addr = uint16_t(table + tile * 16 + r);
+        } else {
+            // 8x16: bit 0 of the tile number picks the pattern table, and the sprite is two
+            // tiles stacked (even tile on top, odd tile below).
+            const uint16_t table = (tile & 1) ? 0x1000 : 0x0000;
+            const uint8_t top = tile & 0xFE;
+            addr = uint16_t(table + (top + (r >= 8 ? 1 : 0)) * 16 + (r & 7));
+        }
+
+        uint8_t lo = vram_read(addr);
+        uint8_t hi = vram_read(uint16_t(addr + 8));
+        if (attr & 0x40) { lo = reverse_bits(lo); hi = reverse_bits(hi); }  // horizontal flip
+
+        sprite_x_[sprite_count_] = oam_[i * 4 + 3];
+        sprite_attr_[sprite_count_] = attr;
+        sprite_lo_[sprite_count_] = lo;
+        sprite_hi_[sprite_count_] = hi;
+        if (i == 0) sprite_zero_on_line_ = true;
+        if (++sprite_count_ == 8) {
+            check_sprite_overflow(i + 1, height);  // the scan for a 9th sprite (with its bug)
+            break;
+        }
+    }
+}
+
+// After 8 sprites are found, the PPU keeps scanning OAM for a 9th to set the overflow flag,
+// but a hardware bug increments the byte offset along with the sprite index. So for each sprite
+// that misses, the next one's tile, attribute or X byte gets treated as its Y coordinate.
+// This produces both false positives and false negatives, and is reproduced here exactly.
+void Ppu::check_sprite_overflow(int start, int height) {
+    int m = 0;
+    for (int n = start; n < 64; ++n) {
+        const int row = scanline_ - oam_[n * 4 + m];
+        if (row >= 0 && row < height) {
+            status_ |= 0x20;
+            return;
+        }
+        m = (m + 1) & 3;  // the bug
+    }
+}
+
+uint8_t Ppu::reverse_bits(uint8_t b) {
+    b = uint8_t((b & 0xF0) >> 4 | (b & 0x0F) << 4);
+    b = uint8_t((b & 0xCC) >> 2 | (b & 0x33) << 2);
+    b = uint8_t((b & 0xAA) >> 1 | (b & 0x55) << 1);
+    return b;
+}
+
 // ---- Pixel output ------------------------------------------------------------------------------
 
 void Ppu::render_pixel() {
@@ -147,7 +222,36 @@ void Ppu::render_pixel() {
         palette = uint8_t(((bg_attrib_lo_ & bit) ? 1 : 0) | ((bg_attrib_hi_ & bit) ? 2 : 0));
     }
 
-    // TODO (Part 5): sprite pixels and priority get mixed in here.
+    // Sprite pixel: the first sprite in OAM order with an opaque pixel here wins.
+    uint8_t spr_pixel = 0, spr_palette = 0;
+    bool spr_behind = false, spr_is_zero = false;
+    const bool show_spr = mask_ & 0x10;
+    const bool show_left_spr = mask_ & 0x04;
+    if (show_spr && (x >= 8 || show_left_spr)) {
+        for (int i = 0; i < sprite_count_; ++i) {
+            const int offset = x - sprite_x_[i];
+            if (offset < 0 || offset > 7) continue;
+            const int bit = 7 - offset;
+            const uint8_t p = uint8_t(((sprite_lo_[i] >> bit) & 1) | (((sprite_hi_[i] >> bit) & 1) << 1));
+            if (p == 0) continue;  // transparent: a later sprite may still show through
+            spr_pixel = p;
+            spr_palette = uint8_t((sprite_attr_[i] & 0x03) + 4);
+            spr_behind = sprite_attr_[i] & 0x20;
+            spr_is_zero = (i == 0) && sprite_zero_on_line_;
+            break;
+        }
+    }
+
+    // Sprite 0 hit: sprite 0 and the background both opaque on the same pixel. Games poll this
+    // flag to time mid-frame effects, e.g. Super Mario Bros. splits its scroll under the status bar.
+    // (Clipping above already zeroes pixels in the left 8 columns when either is hidden there.)
+    if (spr_is_zero && pixel && spr_pixel && x != 255) status_ |= 0x40;
+
+    // Priority: a sprite marked "behind" only shows where the background is transparent.
+    if (spr_pixel && (!pixel || !spr_behind)) {
+        pixel = spr_pixel;
+        palette = spr_palette;
+    }
 
     // Pixel value 0 is transparent and shows the universal background colour ($3F00).
     uint16_t color_addr = uint16_t(0x3F00 + (pixel ? (palette * 4 + pixel) : 0));
@@ -168,8 +272,6 @@ void Ppu::clock() {
     const bool prerender_line = scanline_ == 261;
     const bool rendering = rendering_enabled();
 
-    if (visible_line && dot_ >= 1 && dot_ <= 256) render_pixel();
-
     if (rendering && (visible_line || prerender_line)) {
         // Dots 2-257 fetch for this line; dots 321-336 prefetch the first two tiles of the next.
         if ((dot_ >= 2 && dot_ <= 257) || (dot_ >= 322 && dot_ <= 337)) {
@@ -177,9 +279,20 @@ void Ppu::clock() {
             fetch_background((dot_ - 1) % 8);
         }
         if (dot_ == 256) increment_y();
-        if (dot_ == 257) copy_horizontal();
+        if (dot_ == 257) {
+            copy_horizontal();
+            // Visible pixels for this line are done, so the sprite set can be replaced.
+            // The pre-render line never puts sprites on line 0.
+            if (visible_line) evaluate_sprites();
+            else sprite_count_ = 0;
+        }
+        if (dot_ >= 257 && dot_ <= 320) oam_addr_ = 0;  // the PPU resets OAMADDR while fetching sprites
         if (prerender_line && dot_ >= 280 && dot_ <= 304) copy_vertical();
     }
+
+    // Output after this dot's shift, matching the hardware order. Drawing before the shift put
+    // every background pixel one column to the right (caught by blargg's sprite hit alignment test).
+    if (visible_line && dot_ >= 1 && dot_ <= 256) render_pixel();
 
     if (scanline_ == 241 && dot_ == 1) {
         status_ |= 0x80;                     // enter vblank
@@ -215,12 +328,21 @@ uint8_t Ppu::cpu_read(uint16_t reg) {
             w_ = false;
             return result;
         }
-        case 4:  // OAMDATA
-            return oam_[oam_addr_];
+        case 4: {  // OAMDATA
+            uint8_t v = oam_[oam_addr_];
+            if ((oam_addr_ & 3) == 2) v &= 0xE3;  // attribute bits 2-4 don't exist and read as 0
+            return v;
+        }
         case 7: {  // PPUDATA - reads are buffered, except palette reads
             uint8_t result = read_buffer_;
-            read_buffer_ = vram_read(v_);
-            if ((v_ & 0x3FFF) >= 0x3F00) result = read_buffer_;
+            if ((v_ & 0x3FFF) >= 0x3F00) {
+                // Palette reads return immediately, and the buffer is filled with the nametable
+                // byte that sits "under" the palette ($2F00-$2FFF mirror).
+                result = vram_read(v_);
+                read_buffer_ = vram_read(uint16_t(v_ - 0x1000));
+            } else {
+                read_buffer_ = vram_read(v_);
+            }
             v_ = uint16_t(v_ + ((ctrl_ & 0x04) ? 32 : 1));
             return result;
         }

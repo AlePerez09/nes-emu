@@ -2,7 +2,7 @@
 
 A Nintendo Entertainment System emulator written in C++17.
 
-**Status:** The CPU is complete (all 151 official and 85 stable unofficial opcodes, nestest passing end to end), and the PPU renders backgrounds with a dot-by-dot fetch pipeline and full scrolling support. Sprites are next.
+**Status:** The CPU is complete (all 151 official and 85 stable unofficial opcodes, nestest passing end to end). The PPU renders backgrounds with a dot-by-dot fetch pipeline and full scrolling, plus sprites with priority, flipping, 8x16 mode, sprite 0 hit and the hardware's sprite-overflow bug. Mapper 0 (NROM) games such as Donkey Kong run. More mappers are next.
 
 ## Building
 
@@ -77,9 +77,13 @@ These test ROMs print their result on screen:
 | cpu_timing_test6 | Cycle count of every official instruction | Pass |
 | vbl_nmi_timing 1, 4 | Frame length, vblank flag clear timing | Pass |
 | ppu_vbl_nmi 01, 03, 04, 09 | Vblank flag, NMI enable/disable, odd-frame dot skip | Pass |
-| ppu_vbl_nmi 02, 05-08, 10 | Vblank/NMI timing to the exact PPU dot | Fail (known limitation) |
+| sprite_hit_tests 01-11 | Sprite 0 hit: alignment, corners, flipping, clipping, 8x16, timing | Pass |
+| sprite_overflow_tests 1, 2, 4, 5 | 8-per-line limit, overflow flag, the hardware's diagonal-scan bug | Pass |
+| blargg_ppu_tests: sprite_ram, palette_ram, vram_access | OAM/DMA access, palette mirroring, $2007 read buffer | Pass |
+| oam_read | OAMDATA reads | Pass |
+| ppu_vbl_nmi 02, 05-08, 10; sprite_overflow_tests 3 | Vblank/NMI/overflow timing to the exact PPU dot | Fail (known limitation) |
 
-**Known limitation:** the CPU runs a whole instruction and then catches the PPU up, so the PPU can't see a register read or write at the exact cycle it happens inside an instruction. The failing tests above measure that to the single dot. Almost no games depend on it; fixing it means syncing the PPU on every memory access, which is planned for later.
+**Known limitation:** the CPU runs a whole instruction and then catches the PPU up, so the PPU can't see a register read or write at the exact cycle it happens inside an instruction. The failing tests above measure that to the single dot (sprite overflow is also set when the scanline's sprites are chosen at dot 257, rather than partway through the line as on hardware). Almost no games depend on it; fixing it means syncing the PPU on every memory access, which is planned for later.
 
 ## Architecture
 
@@ -89,7 +93,7 @@ src/core/
   cpu_bus.h           Read/write interface the CPU talks to (real Bus, or flat RAM in tests)
   cpu.h/.cpp          2A03 (6502 without decimal mode), instruction-stepped interpreter
   bus.h/.cpp          CPU memory map: RAM mirroring, PPU registers, OAM DMA, controllers, cartridge
-  ppu.h/.cpp          2C02: registers, background fetch pipeline + shift registers, scrolling, mirroring, vblank/NMI
+  ppu.h/.cpp          2C02: registers, background pipeline, sprite evaluation + priority, scrolling, mirroring, vblank/NMI
   cartridge.h/.cpp    iNES parsing, PRG/CHR ownership, mapper factory
   mappers/            Mapper base class + one subclass per board (NROM so far)
 src/frontend/main.cpp SDL2 window, input, framebuffer presentation
@@ -107,8 +111,8 @@ The core has no SDL dependency, so tests run headless and in CI.
 - [x] Stack, JSR/RTS/RTI/BRK, branches, ADC/SBC, compares, logic, shifts: nestest official section passing
 - [x] Unofficial opcodes: full nestest passing
 - [x] PPU background rendering and scrolling (loopy registers, shift-register pipeline, odd-frame skip)
-- [ ] Sprites, sprite 0 hit, sprite overflow
-- [ ] Donkey Kong, then Super Mario Bros. playable
+- [x] Sprites, sprite 0 hit, sprite overflow (including the hardware bug)
+- [x] Mapper 0 games playable (Donkey Kong)
 - [ ] Mappers 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3)
 - [ ] APU (2 pulse, triangle, noise, DMC)
 - [ ] blargg test ROMs in CI, save states, battery saves, debugger
