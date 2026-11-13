@@ -24,7 +24,12 @@ public:
     void cpu_write(uint16_t reg, uint8_t value);
     void oam_dma_write(uint8_t index, uint8_t value) { oam_[index] = value; }
 
-    bool take_nmi() { bool n = nmi_pending_; nmi_pending_ = false; return n; }
+    bool take_nmi() {
+        if (nmi_pending_ && nmi_delay_) { nmi_delay_ = false; return false; }  // wait one instruction
+        bool n = nmi_pending_;
+        nmi_pending_ = false;
+        return n;
+    }
 
     bool frame_complete = false;
     const std::array<uint32_t, kWidth * kHeight>& framebuffer() const { return framebuffer_; }
@@ -63,6 +68,29 @@ private:
     int scanline_ = 0;
     int dot_ = 0;
     bool nmi_pending_ = false;
+    bool odd_frame_ = false;
+    bool nmi_delay_ = false;   // NMI enabled mid-vblank fires after one more instruction
+
+    // Background rendering
+    bool rendering_enabled() const;
+    void increment_coarse_x();
+    void increment_y();
+    void copy_horizontal();
+    void copy_vertical();
+    void fetch_background(int step);
+    uint16_t background_pattern_addr() const;
+    void load_background_shifters();
+    void shift_background();
+    void render_pixel();
+
+    uint8_t next_tile_ = 0;        // tile fetched 2 tiles ahead of the one being drawn
+    uint8_t next_attrib_ = 0;
+    uint8_t next_pattern_lo_ = 0;
+    uint8_t next_pattern_hi_ = 0;
+    uint16_t bg_pattern_lo_ = 0;   // shift registers: high byte = tile being drawn now
+    uint16_t bg_pattern_hi_ = 0;
+    uint16_t bg_attrib_lo_ = 0;
+    uint16_t bg_attrib_hi_ = 0;
 
     std::array<uint32_t, kWidth * kHeight> framebuffer_{};  // 0xAARRGGBB
 };

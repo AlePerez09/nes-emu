@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
         }
 
         bool running = true;
-        bool debug_patterns = true;  // on by default until the real renderer exists
+        bool debug_patterns = false;  // Tab shows the raw tile graphics instead of the screen
         bool reported_halt = false;
 
         while (running) {

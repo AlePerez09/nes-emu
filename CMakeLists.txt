@@ -35,6 +35,10 @@ add_library(nes_core
 target_include_directories(nes_core PUBLIC src)
 target_link_libraries(nes_core PRIVATE nes_warnings)
 
+# ---- Headless screenshot tool ----
+add_executable(nes_screenshot tests/screenshot.cpp)
+target_link_libraries(nes_screenshot PRIVATE nes_core nes_warnings)
+
 # ---- nestest trace-diff harness ----
 add_executable(nestest_runner tests/nestest_runner.cpp)
 target_link_libraries(nestest_runner PRIVATE nes_core nes_warnings)

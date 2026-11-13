@@ -2,7 +2,7 @@
 
 A Nintendo Entertainment System emulator written in C++17.
 
-**Status:** The CPU is complete. All 151 official 6502 opcodes and 85 stable unofficial ones pass 10,000 SingleStepTests cases each, and nestest passes end to end (8,991 instructions, cycle-exact). PPU rendering is next.
+**Status:** The CPU is complete (all 151 official and 85 stable unofficial opcodes, nestest passing end to end), and the PPU renders backgrounds with a dot-by-dot fetch pipeline and full scrolling support. Sprites are next.
 
 ## Building
 
@@ -59,6 +59,28 @@ Pass an optional third argument to stop after N lines (the official-opcode secti
 
 The unstable unofficial opcodes (XAA, LAX #imm, SHA, SHX, SHY, TAS, LAS), whose results vary between physical chips, and the JAM opcodes that lock up the CPU are intentionally not implemented. No licensed game depends on them; hitting one halts the emulator with a message.
 
+### Rendering and timing tests
+
+`nes_screenshot` runs a ROM headlessly and saves the last frame as a `.bmp`, so rendering can be checked without a window:
+
+```sh
+sh tests/roms/fetch_test_roms.sh                       # also fetches the ROMs below into tests/roms/ppu/
+./build/nes_screenshot tests/roms/ppu/1.Branch_Basics.nes out.bmp 900
+./build/nes_screenshot game.nes title.bmp 300 --press-start-at=120
+```
+
+These test ROMs print their result on screen:
+
+| ROM | Checks | Result |
+|---|---|---|
+| branch_timing_tests 1-3 | Branch cycle counts, NMI period | Pass |
+| cpu_timing_test6 | Cycle count of every official instruction | Pass |
+| vbl_nmi_timing 1, 4 | Frame length, vblank flag clear timing | Pass |
+| ppu_vbl_nmi 01, 03, 04, 09 | Vblank flag, NMI enable/disable, odd-frame dot skip | Pass |
+| ppu_vbl_nmi 02, 05-08, 10 | Vblank/NMI timing to the exact PPU dot | Fail (known limitation) |
+
+**Known limitation:** the CPU runs a whole instruction and then catches the PPU up, so the PPU can't see a register read or write at the exact cycle it happens inside an instruction. The failing tests above measure that to the single dot. Almost no games depend on it; fixing it means syncing the PPU on every memory access, which is planned for later.
+
 ## Architecture
 
 ```
@@ -67,11 +89,11 @@ src/core/
   cpu_bus.h           Read/write interface the CPU talks to (real Bus, or flat RAM in tests)
   cpu.h/.cpp          2A03 (6502 without decimal mode), instruction-stepped interpreter
   bus.h/.cpp          CPU memory map: RAM mirroring, PPU registers, OAM DMA, controllers, cartridge
-  ppu.h/.cpp          2C02: registers, loopy v/t/x/w, VRAM + nametable mirroring, palette, vblank/NMI
+  ppu.h/.cpp          2C02: registers, background fetch pipeline + shift registers, scrolling, mirroring, vblank/NMI
   cartridge.h/.cpp    iNES parsing, PRG/CHR ownership, mapper factory
   mappers/            Mapper base class + one subclass per board (NROM so far)
 src/frontend/main.cpp SDL2 window, input, framebuffer presentation
-tests/                nestest trace-diff harness, per-opcode CPU test runner
+tests/                nestest trace-diff harness, per-opcode CPU test runner, headless screenshot tool
 ```
 
 The core has no SDL dependency, so tests run headless and in CI.
@@ -84,7 +106,8 @@ The core has no SDL dependency, so tests run headless and in CI.
 - [x] All addressing modes; loads, stores, transfers, flags, inc/dec, JMP (per-opcode tests passing)
 - [x] Stack, JSR/RTS/RTI/BRK, branches, ADC/SBC, compares, logic, shifts: nestest official section passing
 - [x] Unofficial opcodes: full nestest passing
-- [ ] PPU background rendering, then sprites, sprite 0 hit, scrolling
+- [x] PPU background rendering and scrolling (loopy registers, shift-register pipeline, odd-frame skip)
+- [ ] Sprites, sprite 0 hit, sprite overflow
 - [ ] Donkey Kong, then Super Mario Bros. playable
 - [ ] Mappers 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3)
 - [ ] APU (2 pulse, triangle, noise, DMC)
